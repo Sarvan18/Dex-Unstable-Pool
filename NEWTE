@@ -1,0 +1,1534 @@
+const {
+  expectEvent, // Assertions for emitted events
+  time,
+  expectRevert,
+  ether,
+} = require("@openzeppelin/test-helpers");
+var chai = require("chai");
+const Web3 = require("web3");
+const { web3, artifacts } = require("hardhat");
+var expect = chai.expect;
+
+const BEPUSDT = artifacts.require("BEP20USDT");
+const WMETA = artifacts.require("WMETA");
+const Factory = artifacts.require("metatrondexFactory");
+const Intermediate = artifacts.require("metatronRouter02");
+const Router = artifacts.require("metatrondexRouter");
+const pair = artifacts.require("metatrondexPair");
+
+contract("DEX Contract testing", async (accounts) => {
+  const owner = accounts[0];
+  const PK =
+    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+  const _period = 0;
+
+  before(async function () {
+    BEPUSDT_Instance = await BEPUSDT.new();
+    WMETA_Instance = await WMETA.new(owner);
+    Factory_Instance = await Factory.new(owner, owner, owner, _period);
+    Intermediate_Instance = await Intermediate.new(owner, owner);
+    Router_Instance = await Router.new(
+      Factory_Instance.address,
+      WMETA_Instance.address,
+      owner,
+      Intermediate_Instance.address
+    );
+  });
+
+  function testAccount(account) {
+    return accounts[account + 1];
+  }
+
+  describe(" <------------> Getting INIT Code  <------------>  ", () => {
+    it("check init code", async () => {
+      const initcode = await Factory_Instance.INIT_CODE_PAIR_HASH();
+      console.log("initcode", initcode);
+    });
+  });
+
+  describe(" <----------------------> Metatron USDT Pool Testing <---------------------->", () => {
+    it(" ", async () => {
+      async function deadlineTime() {
+        return String(
+          Number(await time.latest()) + Number(time.duration.minutes(10))
+        );
+      }
+      async function tokenData(user, liquidity) {
+        const GetLiquidityData = await Router_Instance.getLiquidityData(
+          user,
+          BEPUSDT_Instance.address
+        );
+        const userLiquidity = GetLiquidityData[4];
+
+        const pariAddress = await Factory_Instance.getPair(
+          BEPUSDT_Instance.address,
+          WMETA_Instance.address
+        );
+        let paircakeInstance = await pair.at(pariAddress);
+
+        const _reserve0 = await paircakeInstance.getReserves();
+        const _reserve1 = await paircakeInstance.getReserves();
+
+        const UserLiquidity = (100e18 * liquidity) / userLiquidity;
+        const token0Amount = (GetLiquidityData[2] * UserLiquidity) / 100e18;
+        const token1Amount = (GetLiquidityData[3] * UserLiquidity) / 100e18;
+
+        if (token0Amount > _reserve0) {
+          const excess = token0Amount - _reserve0;
+          token0Amount = _reserve0;
+          token1Amount += excess;
+
+          if (token1Amount > _reserve1) {
+            token1Amount = _reserve1;
+          }
+        } else if (token1Amount > _reserve1) {
+          const excess = token1Amount - _reserve1;
+          token1Amount = _reserve1;
+          token0Amount += excess;
+
+          if (token0Amount > _reserve0) {
+            token0Amount = _reserve0;
+          }
+        }
+        return { token0Amount, token1Amount };
+      }
+
+      function expectData(_beforeBalance, _afterBalance, expectedAmount) {
+        expect(String(Number(_afterBalance) - Number(_beforeBalance))).equal(
+          String(Number(expectedAmount))
+        );
+      }
+
+      async function ownerTransfer(_tokenInstance, _user, _amount) {
+        const beforeBalance = await balanceOf(_tokenInstance, _user);
+        await _tokenInstance.transfer(_user, _amount, { from: owner });
+        const afterBalance = await balanceOf(_tokenInstance, _user);
+        expectData(beforeBalance, afterBalance, _amount);
+      }
+
+      async function approve(_tokenInstance, _spendor, _amount, _user) {
+        await _tokenInstance.approve(_spendor, _amount, { from: _user });
+        await checkAllowance(_tokenInstance, _user, _spendor, _amount);
+      }
+
+      async function balanceOf(_tokenInstance, _user) {
+        return String(await _tokenInstance.balanceOf(_user));
+      }
+
+      async function checkAllowance(_tokenInstance, _from, _to, _amount) {
+        const expectedAmount = await _tokenInstance.allowance(_from, _to);
+        expect(String(expectedAmount)).equal(String(_amount));
+      }
+
+      async function signature(
+        _address,
+        _amountIn,
+        _amountMin,
+        _tokenAddress1,
+        _tokenAddress2,
+        _user,
+        _deadline
+      ) {
+        const prepareHash = await Intermediate_Instance.prepareMessageHash(
+          _address,
+          _amountIn,
+          _amountMin,
+          _tokenAddress1,
+          _tokenAddress2,
+          _user,
+          _deadline
+        );
+        return {
+          hash: prepareHash,
+          sig: await web3.eth.accounts.sign(prepareHash, PK).signature,
+        };
+      }
+
+      async function verifySignature(_hash, _sig) {
+        const verifySignature = await Intermediate_Instance.verifySignature(
+          _hash,
+          _sig
+        );
+        expect(verifySignature).equal(owner);
+      }
+
+      async function checkLiquidity(
+        liquidityData,
+        beforeBalanceA,
+        beforeBalanceB,
+        isFirst
+      ) {
+        await ownerTransfer(
+          BEPUSDT_Instance,
+          liquidityData.user,
+          liquidityData.amountADesired
+        );
+        await approve(
+          BEPUSDT_Instance,
+          Intermediate_Instance.address,
+          liquidityData.amountADesired,
+          liquidityData.user
+        );
+        const beforeLiquidityData = await Router_Instance.getLiquidityData(
+          liquidityData.user,
+          liquidityData.tokenA
+        );
+        let beforeReserve = [];
+        if (isFirst) {
+          const pairContract = await pairInstance();
+          beforeReserve = await pairContract.getReserves();
+        }
+        await Intermediate_Instance.addLiquidityETH(
+          [
+            liquidityData.router,
+            liquidityData.tokenA,
+            liquidityData.tokenB,
+            liquidityData.amountADesired,
+            liquidityData.amountTokenMin,
+            liquidityData.amountETHMin,
+            liquidityData.user,
+            liquidityData.deadline,
+            liquidityData.sig,
+          ],
+          {
+            from: liquidityData.user,
+            value: liquidityData.amountBDesired,
+          }
+        );
+        const pairContract = await pairInstance();
+        const afterReserve = await pairContract.getReserves();
+
+        expect(String((afterReserve[0] / 1e18).toFixed())).equal(
+          String(
+            (
+              (Number(
+                beforeReserve[0] == undefined ? Number(0) : beforeReserve[0]
+              ) +
+                Number(liquidityData.amountADesired)) /
+              1e18
+            ).toFixed()
+          )
+        );
+        expect(String((afterReserve[1] / 1e18).toFixed())).equal(
+          String(
+            (
+              (Number(
+                beforeReserve[1] == undefined ? Number(0) : beforeReserve[1]
+              ) +
+                Number(Number(liquidityData.amountBDesired))) /
+              1e18
+            ).toFixed()
+          )
+        );
+        const afterBalanceA = await balanceOf(
+          BEPUSDT_Instance,
+          liquidityData.user
+        );
+
+        const afterBalanceB = await web3.eth.getBalance(liquidityData.user);
+        const userLiquidityBalance = await balanceOf(
+          pairContract,
+          liquidityData.user
+        );
+        const data = await Router_Instance.getLiquidityData(
+          liquidityData.user,
+          liquidityData.tokenA
+        );
+        expect(String(data[0])).equal(String(liquidityData.tokenA));
+        expect(String(data[1])).equal(String(liquidityData.tokenB));
+        expect(String(data[2])).equal(
+          String(
+            Number(liquidityData.amountADesired) +
+              Number(beforeLiquidityData[2])
+          )
+        );
+        expect(String(data[3])).equal(
+          String(
+            Number(liquidityData.amountBDesired) +
+              Number(beforeLiquidityData[3])
+          )
+        );
+        expect(String(data[4])).equal(
+          String(Number(userLiquidityBalance) + Number(beforeLiquidityData[4]))
+        );
+        expect(
+          String(
+            ((Number(beforeBalanceA) - Number(afterBalanceA)) / 1e18).toFixed()
+          )
+        ).equal(
+          String(Number((liquidityData.amountADesired / 1e18).toFixed()))
+        );
+        expect(
+          String(
+            ((Number(beforeBalanceB) - Number(afterBalanceB)) / 1e18).toFixed()
+          )
+        ).equal(
+          String(Number((liquidityData.amountBDesired / 1e18).toFixed()))
+        );
+      }
+
+      function liquidityParams(
+        router,
+        tokenA,
+        tokenB,
+        amountADesired,
+        amountBDesired,
+        amountTokenMin,
+        amountETHMin,
+        user,
+        deadline,
+        _sig
+      ) {
+        return {
+          router,
+          tokenA,
+          tokenB,
+          amountADesired,
+          amountBDesired,
+          amountTokenMin,
+          amountETHMin,
+          user,
+          deadline,
+          sig: _sig,
+        };
+      }
+
+      async function getAmountsOut(amountIn, path) {
+        const amountOut = await Router_Instance.getAmountsOut(amountIn, path);
+        return String(amountOut[1]);
+      }
+      async function getAmountsIn(amountOut, path) {
+        const amountsIn = await Router_Instance.getAmountsIn(amountOut, path);
+        return String(amountsIn[0]);
+      }
+      async function swapExactETHForTokens(
+        amountOut,
+        amountIn,
+        path,
+        user,
+        beforeBalanceFrom,
+        beforeBalanceTo
+      ) {
+        const deadline = await deadlineTime();
+        const sig = await signature(
+          Router_Instance.address,
+          amountIn,
+          amountOut,
+          String(path[0]),
+          String(path[1]),
+          user,
+          deadline
+        );
+
+        await verifySignature(sig.hash, sig.sig);
+
+        await Intermediate_Instance.swapExactETHForTokens(
+          Router_Instance.address,
+          amountOut,
+          path,
+          user,
+          deadline,
+          sig.sig,
+          { from: user, value: amountIn }
+        );
+
+        await expectTokensBalance(
+          beforeBalanceFrom,
+          beforeBalanceTo,
+          amountIn,
+          amountOut,
+          user
+        );
+      }
+
+      async function swapTokensForExactETH(
+        amountOut,
+        amountIn,
+        path,
+        user,
+        beforeBalanceFrom,
+        beforeBalanceTo
+      ) {
+        const deadline = await deadlineTime();
+        const sig = await signature(
+          Router_Instance.address,
+          amountIn,
+          amountOut,
+          String(path[0]),
+          String(path[1]),
+          user,
+          deadline
+        );
+
+        await verifySignature(sig.hash, sig.sig);
+        await ownerTransfer(BEPUSDT_Instance, user, amountIn);
+        await approve(
+          BEPUSDT_Instance,
+          Intermediate_Instance.address,
+          amountIn,
+          user
+        );
+        await Intermediate_Instance.swapTokensForExactETH(
+          Router_Instance.address,
+          amountOut,
+          amountIn,
+          path,
+          user,
+          deadline,
+          sig.sig,
+          { from: user }
+        );
+        const afterBalanceFrom = await balanceOf(BEPUSDT_Instance, user);
+        const afterBalanceTo = await web3.eth.getBalance(user);
+        expect(
+          String(
+            (
+              (Number(beforeBalanceFrom) - Number(afterBalanceFrom)) /
+              1e18
+            ).toFixed()
+          )
+        ).equal(String((Number(0) / 1e18).toFixed()));
+        expect(
+          String(
+            (
+              (Number(afterBalanceTo) - Number(beforeBalanceTo)) /
+              1e18
+            ).toFixed()
+          )
+        ).equal(String((Number(amountOut) / 1e18).toFixed()));
+      }
+      async function swapExactTokensForETH(
+        amountOut,
+        amountIn,
+        path,
+        user,
+        beforeBalanceFrom,
+        beforeBalanceTo
+      ) {
+        const deadline = await deadlineTime();
+        const sig = await signature(
+          Router_Instance.address,
+          amountIn,
+          amountOut,
+          String(path[0]),
+          String(path[1]),
+          user,
+          deadline
+        );
+
+        await verifySignature(sig.hash, sig.sig);
+        await ownerTransfer(BEPUSDT_Instance, user, amountIn);
+        await approve(
+          BEPUSDT_Instance,
+          Intermediate_Instance.address,
+          amountIn,
+          user
+        );
+        await Intermediate_Instance.swapExactTokensForETH(
+          Router_Instance.address,
+          amountIn,
+          amountOut,
+          path,
+          user,
+          deadline,
+          sig.sig,
+          { from: user }
+        );
+        const afterBalanceFrom = await balanceOf(BEPUSDT_Instance, user);
+        const afterBalanceTo = await web3.eth.getBalance(user);
+        expect(
+          String(
+            (
+              (Number(beforeBalanceFrom) - Number(afterBalanceFrom)) /
+              1e18
+            ).toFixed()
+          )
+        ).equal(String((Number(0) / 1e18).toFixed()));
+        expect(
+          String(
+            (
+              (Number(afterBalanceTo) - Number(beforeBalanceTo)) /
+              1e18
+            ).toFixed()
+          )
+        ).equal(String((Number(amountOut) / 1e18).toFixed()));
+      }
+
+      async function swapETHForExactTokens(
+        amountOut,
+        amountIn,
+        path,
+        user,
+        beforeBalanceFrom,
+        beforeBalanceTo
+      ) {
+        const deadline = await deadlineTime();
+        const sig = await signature(
+          Router_Instance.address,
+          amountIn,
+          amountOut,
+          String(path[0]),
+          String(path[1]),
+          user,
+          deadline
+        );
+
+        await verifySignature(sig.hash, sig.sig);
+
+        await Intermediate_Instance.swapETHForExactTokens(
+          Router_Instance.address,
+          amountOut,
+          path,
+          user,
+          deadline,
+          sig.sig,
+          {
+            from: user,
+            value: amountIn,
+          }
+        );
+        const afterBalanceFrom = await web3.eth.getBalance(user);
+        const afterBalanceTo = await balanceOf(BEPUSDT_Instance, user);
+        expect(
+          String(
+            (
+              (Number(beforeBalanceFrom) - Number(afterBalanceFrom)) /
+              1e18
+            ).toFixed()
+          )
+        ).equal(String((Number(amountIn) / 1e18).toFixed()));
+        expect(
+          String(
+            (
+              (Number(afterBalanceTo) - Number(beforeBalanceTo)) /
+              1e18
+            ).toFixed()
+          )
+        ).equal(String((Number(amountOut) / 1e18).toFixed()));
+      }
+
+      function convertAmount(_amount) {
+        return String(web3.utils.toWei(String(_amount), "ether"));
+      }
+
+      async function expectTokensBalance(
+        beforeBalanceFrom,
+        beforeBalanceTo,
+        expectedAmountA,
+        expectedAmountB,
+        user
+      ) {
+        const afterBalanceFrom = await web3.eth.getBalance(user);
+        const afterBalanceTo = await balanceOf(BEPUSDT_Instance, user);
+        expect(
+          String(
+            (
+              (Number(beforeBalanceFrom) - Number(afterBalanceFrom)) /
+              1e18
+            ).toFixed()
+          )
+        ).equal(String((Number(expectedAmountA) / 1e18).toFixed()));
+        expect(
+          String(
+            (
+              (Number(afterBalanceTo) - Number(beforeBalanceTo)) /
+              1e18
+            ).toFixed()
+          )
+        ).equal(String((Number(expectedAmountB) / 1e18).toFixed()));
+      }
+
+      async function pairInstance() {
+        const pairAddress = await Factory_Instance.getPair(
+          WMETA_Instance.address,
+          BEPUSDT_Instance.address
+        );
+        return await pair.at(pairAddress);
+      }
+
+      async function slippageAmount(liquidityAmount) {
+        const slippage =
+          (Number(liquidityAmount) * Number(0.01e18)) / Number(100e18);
+        return String(Number(liquidityAmount) - Number(slippage));
+      }
+
+      async function removeLiquidityETH(liquidityAmount, user) {
+        const deadline = await deadlineTime();
+        const beforeBalanceFrom = await web3.eth.getBalance(user);
+        const beforeBalanceTo = await balanceOf(BEPUSDT_Instance, user);
+        const sig = await signature(
+          Router_Instance.address,
+          liquidityAmount,
+          "0",
+          WMETA_Instance.address,
+          BEPUSDT_Instance.address,
+          user,
+          deadline
+        );
+        const paramsData = [
+          Router_Instance.address,
+          Factory_Instance.address,
+          BEPUSDT_Instance.address,
+          WMETA_Instance.address,
+          liquidityAmount,
+          "0",
+          "0",
+          user,
+          deadline,
+          sig.sig,
+        ];
+        const tokenAmounts = await tokenData(user, liquidityAmount);
+        await verifySignature(sig.hash, sig.sig);
+        const pairContract = await pairInstance();
+        await approve(
+          pairContract,
+          Intermediate_Instance.address,
+          liquidityAmount,
+          user
+        );
+        await Intermediate_Instance.removeLiquidityOnETH(paramsData, {
+          from: user,
+        });
+        const afterBalanceFrom = await web3.eth.getBalance(user);
+        const afterBalanceTo = await balanceOf(BEPUSDT_Instance, user);
+        expect(
+          String(
+            (
+              (Number(afterBalanceFrom) - Number(beforeBalanceFrom)) /
+              1e18
+            ).toFixed()
+          )
+        ).equal(String(Number((tokenAmounts.token1Amount / 1e18).toFixed())));
+
+        expect(
+          String(
+            (
+              (Number(afterBalanceTo) - Number(beforeBalanceTo)) /
+              1e18
+            ).toFixed()
+          )
+        ).equal(String(Number((tokenAmounts.token0Amount / 1e18).toFixed())));
+      }
+
+      describe(" ------------ ADD LIQUIDITY ------------ ", function () {
+        describe(" ", function () {
+          it(" ------- USER - 1 ( USDT - 500 / META 1000 ) ------- ", async () => {
+            const user = testAccount(1);
+            const router = Router_Instance.address;
+            const token0 = BEPUSDT_Instance.address;
+            const token1 = WMETA_Instance.address;
+            const amount0 = convertAmount(500);
+            const amount1 = convertAmount(1000);
+            const amount0Min = "0";
+            const amount1Min = "0";
+            const deadline = await deadlineTime();
+            const sig = await signature(
+              router,
+              amount0,
+              amount0Min,
+              token0,
+              token1,
+              user,
+              deadline
+            );
+            await verifySignature(sig.hash, sig.sig);
+            const liquidityData = liquidityParams(
+              Router_Instance.address,
+              BEPUSDT_Instance.address,
+              WMETA_Instance.address,
+              convertAmount(500),
+              convertAmount(1000),
+              "0",
+              "0",
+              user,
+              await deadlineTime(),
+              sig.sig
+            );
+            const beforeBalanceA = await balanceOf(BEPUSDT_Instance, user);
+            const beforeBalanceB = await web3.eth.getBalance(user);
+            await checkLiquidity(
+              liquidityData,
+              beforeBalanceA,
+              beforeBalanceB,
+              false
+            );
+          });
+        });
+      });
+
+      // describe(" <------------> AddLiquidity ETH <------------>", () => {
+      //   it(" <------> 10:1000 addLiquidity User - 7 userlp:100, usdt:10, wmeta:1000 <------> ", async () => {
+      //     const user = testAccount(7);
+      //     const tokenAaddress = await BEPUSDT_Instance.address;
+      //     const tokenBaddress = await WMETA_Instance.address;
+      //     const amountADesired = web3.utils.toWei("10", "ether");
+      //     const amountBDesired = web3.utils.toWei("1000", "ether");
+      //     const amountTokenMin = web3.utils.toWei("1", "ether");
+      //     const amountETHMin = web3.utils.toWei("1", "ether");
+      //     const deadline =
+      //       Number(await time.latest()) + Number(time.duration.minutes(10));
+      //     await ownerTransfer(BEPUSDT_Instance, user, amountADesired);
+      //     const userBeforeBalanceA = await balanceOf(BEPUSDT_Instance, user);
+      //     expect(Number(userBeforeBalanceA)).equal(Number(amountADesired));
+      //     const userBeforeBalanceB = await web3.eth.getBalance(user);
+      //     await approve(
+      //       BEPUSDT_Instance,
+      //       Intermediate_Instance.address,
+      //       amountADesired,
+      //       user
+      //     );
+      //     await checkAllowance(
+      //       BEPUSDT_Instance,
+      //       user,
+      //       Intermediate_Instance.address,
+      //       amountADesired
+      //     );
+
+      //     const sig = await signature(
+      //       Router_Instance.address,
+      //       amountADesired,
+      //       amountTokenMin,
+      //       tokenBaddress,
+      //       tokenAaddress,
+      //       user,
+      //       deadline
+      //     );
+      //     await verifySignature(sig.hash, sig.sig);
+      //     const liquidityData = liquidityParams(
+      //       Router_Instance.address,
+      //       tokenAaddress,
+      //       tokenBaddress,
+      //       amountADesired,
+      //       amountBDesired,
+      //       amountTokenMin,
+      //       amountETHMin,
+      //       user,
+      //       deadline,
+      //       sig.sig
+      //     );
+
+      //     await checkLiquidity(
+      //       liquidityData,
+      //       userBeforeBalanceA,
+      //       userBeforeBalanceB
+      //     );
+      //   });
+      //   it(" <------> 10:10 addLiquidity User - 6 userlp:1, usdt:10, wmeta:10 <------> ", async () => {
+      //     const user = testAccount(6);
+      //     const tokenAaddress = await BEPUSDT_Instance.address;
+      //     const tokenBaddress = await WMETA_Instance.address;
+      //     const amountADesired = web3.utils.toWei("10", "ether");
+      //     const amountBDesired = web3.utils.toWei("10", "ether");
+      //     const amountTokenMin = web3.utils.toWei("1", "ether");
+      //     const amountETHMin = web3.utils.toWei("1", "ether");
+      //     const deadline =
+      //       Number(await time.latest()) + Number(time.duration.minutes(10));
+      //     await ownerTransfer(BEPUSDT_Instance, user, amountADesired);
+      //     const userBeforeBalanceA = await balanceOf(BEPUSDT_Instance, user);
+      //     expect(Number(userBeforeBalanceA)).equal(Number(amountADesired));
+      //     const userBeforeBalanceB = await web3.eth.getBalance(user);
+      //     await approve(
+      //       BEPUSDT_Instance,
+      //       Intermediate_Instance.address,
+      //       amountADesired,
+      //       user
+      //     );
+      //     await checkAllowance(
+      //       BEPUSDT_Instance,
+      //       user,
+      //       Intermediate_Instance.address,
+      //       amountADesired
+      //     );
+
+      //     const sig = await signature(
+      //       Router_Instance.address,
+      //       amountADesired,
+      //       amountTokenMin,
+      //       tokenBaddress,
+      //       tokenAaddress,
+      //       user,
+      //       deadline
+      //     );
+      //     await verifySignature(sig.hash, sig.sig);
+      //     const liquidityData = liquidityParams(
+      //       Router_Instance.address,
+      //       tokenAaddress,
+      //       tokenBaddress,
+      //       amountADesired,
+      //       amountBDesired,
+      //       amountTokenMin,
+      //       amountETHMin,
+      //       user,
+      //       deadline,
+      //       sig.sig
+      //     );
+
+      //     await checkLiquidity(
+      //       liquidityData,
+      //       userBeforeBalanceA,
+      //       userBeforeBalanceB
+      //     );
+      //   });
+      //   it(" <------> 200:100 addLiquidity User-8 userlp:10, usdt:200, wmeta:100 <------> ", async () => {
+      //     const user = testAccount(8);
+      //     const tokenAaddress = await BEPUSDT_Instance.address;
+      //     const tokenBaddress = await WMETA_Instance.address;
+      //     const amountADesired = web3.utils.toWei("200", "ether");
+      //     const amountBDesired = web3.utils.toWei("100", "ether");
+      //     const amountTokenMin = web3.utils.toWei("1", "ether");
+      //     const amountETHMin = web3.utils.toWei("1", "ether");
+      //     const deadline =
+      //       Number(await time.latest()) + Number(time.duration.minutes(10));
+      //     await ownerTransfer(BEPUSDT_Instance, user, amountADesired);
+      //     const userBeforeBalanceA = await balanceOf(BEPUSDT_Instance, user);
+      //     expect(Number(userBeforeBalanceA)).equal(Number(amountADesired));
+      //     const userBeforeBalanceB = await web3.eth.getBalance(user);
+      //     await approve(
+      //       BEPUSDT_Instance,
+      //       Intermediate_Instance.address,
+      //       amountADesired,
+      //       user
+      //     );
+      //     await checkAllowance(
+      //       BEPUSDT_Instance,
+      //       user,
+      //       Intermediate_Instance.address,
+      //       amountADesired
+      //     );
+
+      //     const sig = await signature(
+      //       Router_Instance.address,
+      //       amountADesired,
+      //       amountTokenMin,
+      //       tokenBaddress,
+      //       tokenAaddress,
+      //       user,
+      //       deadline
+      //     );
+      //     await verifySignature(sig.hash, sig.sig);
+      //     const liquidityData = liquidityParams(
+      //       Router_Instance.address,
+      //       tokenAaddress,
+      //       tokenBaddress,
+      //       amountADesired,
+      //       amountBDesired,
+      //       amountTokenMin,
+      //       amountETHMin,
+      //       user,
+      //       deadline,
+      //       sig.sig
+      //     );
+
+      //     await checkLiquidity(
+      //       liquidityData,
+      //       userBeforeBalanceA,
+      //       userBeforeBalanceB
+      //     );
+      //   });
+      //   it(" <------> 5000:100 addLiquidity User-9 userlp:10, usdt:5000, wmeta:100 <------> ", async () => {
+      //     const user = testAccount(9);
+      //     const tokenAaddress = await BEPUSDT_Instance.address;
+      //     const tokenBaddress = await WMETA_Instance.address;
+      //     const amountADesired = web3.utils.toWei("5000", "ether");
+      //     const amountBDesired = web3.utils.toWei("100", "ether");
+      //     const amountTokenMin = web3.utils.toWei("1", "ether");
+      //     const amountETHMin = web3.utils.toWei("1", "ether");
+      //     const deadline =
+      //       Number(await time.latest()) + Number(time.duration.minutes(10));
+      //     await ownerTransfer(BEPUSDT_Instance, user, amountADesired);
+      //     const userBeforeBalanceA = await balanceOf(BEPUSDT_Instance, user);
+      //     expect(Number(userBeforeBalanceA)).equal(Number(amountADesired));
+      //     const userBeforeBalanceB = await web3.eth.getBalance(user);
+      //     await approve(
+      //       BEPUSDT_Instance,
+      //       Intermediate_Instance.address,
+      //       amountADesired,
+      //       user
+      //     );
+      //     await checkAllowance(
+      //       BEPUSDT_Instance,
+      //       user,
+      //       Intermediate_Instance.address,
+      //       amountADesired
+      //     );
+
+      //     const sig = await signature(
+      //       Router_Instance.address,
+      //       amountADesired,
+      //       amountTokenMin,
+      //       tokenBaddress,
+      //       tokenAaddress,
+      //       user,
+      //       deadline
+      //     );
+      //     await verifySignature(sig.hash, sig.sig);
+      //     const liquidityData = liquidityParams(
+      //       Router_Instance.address,
+      //       tokenAaddress,
+      //       tokenBaddress,
+      //       amountADesired,
+      //       amountBDesired,
+      //       amountTokenMin,
+      //       amountETHMin,
+      //       user,
+      //       deadline,
+      //       sig.sig
+      //     );
+
+      //     await checkLiquidity(
+      //       liquidityData,
+      //       userBeforeBalanceA,
+      //       userBeforeBalanceB
+      //     );
+      //   });
+      //   it(" <------> 500: 9000 addLiquidity User - 10 userlp:10, usdt:500, wmeta:9000 <------> ", async () => {
+      //     const user = testAccount(10);
+      //     const tokenAaddress = await BEPUSDT_Instance.address;
+      //     const tokenBaddress = await WMETA_Instance.address;
+      //     const amountADesired = web3.utils.toWei("500", "ether");
+      //     const amountBDesired = web3.utils.toWei("9000", "ether");
+      //     const amountTokenMin = web3.utils.toWei("1", "ether");
+      //     const amountETHMin = web3.utils.toWei("1", "ether");
+      //     const deadline =
+      //       Number(await time.latest()) + Number(time.duration.minutes(10));
+      //     await ownerTransfer(BEPUSDT_Instance, user, amountADesired);
+      //     const userBeforeBalanceA = await balanceOf(BEPUSDT_Instance, user);
+      //     expect(Number(userBeforeBalanceA)).equal(Number(amountADesired));
+      //     const userBeforeBalanceB = await web3.eth.getBalance(user);
+      //     await approve(
+      //       BEPUSDT_Instance,
+      //       Intermediate_Instance.address,
+      //       amountADesired,
+      //       user
+      //     );
+      //     await checkAllowance(
+      //       BEPUSDT_Instance,
+      //       user,
+      //       Intermediate_Instance.address,
+      //       amountADesired
+      //     );
+
+      //     const sig = await signature(
+      //       Router_Instance.address,
+      //       amountADesired,
+      //       amountTokenMin,
+      //       tokenBaddress,
+      //       tokenAaddress,
+      //       user,
+      //       deadline
+      //     );
+      //     await verifySignature(sig.hash, sig.sig);
+      //     const liquidityData = liquidityParams(
+      //       Router_Instance.address,
+      //       tokenAaddress,
+      //       tokenBaddress,
+      //       amountADesired,
+      //       amountBDesired,
+      //       amountTokenMin,
+      //       amountETHMin,
+      //       user,
+      //       deadline,
+      //       sig.sig
+      //     );
+
+      //     await checkLiquidity(
+      //       liquidityData,
+      //       userBeforeBalanceA,
+      //       userBeforeBalanceB
+      //     );
+      //   });
+      // });
+
+      // describe(" <------------> swap function <------------> ", () => {
+      //   it(" <------> swapExactETHForTokens TestAccount 12 <------> ", async () => {
+      //     const amountIn = web3.utils.toWei("10", "ether");
+
+      //     const path = [WMETA_Instance.address, BEPUSDT_Instance.address];
+      //     const user = testAccount(11);
+      //     const amountOut = await getAmountsOut(amountIn, path);
+      //     console.log("🦐 amountOut", amountOut);
+
+      //     const beforeBalanceFrom = await web3.eth.getBalance(user);
+      //     const beforeBalanceTo = await balanceOf(BEPUSDT_Instance, user);
+      //     await swapExactETHForTokens(
+      //       amountOut,
+      //       amountIn,
+      //       path,
+      //       user,
+      //       beforeBalanceFrom,
+      //       beforeBalanceTo
+      //     );
+      //   });
+      //   it(" <------> swapExactETHForTokens- user - 15 <------> ", async () => {
+      //     const amountIn = web3.utils.toWei("1", "ether");
+      //     const path = [WMETA_Instance.address, BEPUSDT_Instance.address];
+      //     const user = testAccount(15);
+      //     const amountOut = String(
+      //       Number(await getAmountsOut(amountIn, path)) +
+      //         Number(web3.utils.toWei("2", "ether"))
+      //     );
+
+      //     const beforeBalanceFrom = await web3.eth.getBalance(user);
+      //     const beforeBalanceTo = await balanceOf(BEPUSDT_Instance, user);
+      //     await swapExactETHForTokens(
+      //       amountOut,
+      //       amountIn,
+      //       path,
+      //       user,
+      //       beforeBalanceFrom,
+      //       beforeBalanceTo
+      //     );
+      //   });
+      //   it(" <------> swapExactETHForTokens-User 15  <------> ", async () => {
+      //     const amountIn = web3.utils.toWei("2", "ether");
+      //     const path = [WMETA_Instance.address, BEPUSDT_Instance.address];
+      //     const user = testAccount(15);
+      //     const amountOut = String(
+      //       Number(await getAmountsOut(amountIn, path)) +
+      //         Number(web3.utils.toWei("5", "ether"))
+      //     );
+
+      //     const beforeBalanceFrom = await web3.eth.getBalance(user);
+      //     const beforeBalanceTo = await balanceOf(BEPUSDT_Instance, user);
+      //     await swapExactETHForTokens(
+      //       amountOut,
+      //       amountIn,
+      //       path,
+      //       user,
+      //       beforeBalanceFrom,
+      //       beforeBalanceTo
+      //     );
+      //   });
+      //   it(" <------> swapExactETHForTokens-user -13  <------> ", async () => {
+      //     const amountIn = web3.utils.toWei("1", "ether");
+      //     const path = [WMETA_Instance.address, BEPUSDT_Instance.address];
+      //     const user = testAccount(13);
+      //     const amountOut = String(
+      //       Number(await getAmountsOut(amountIn, path)) +
+      //         Number(web3.utils.toWei("3", "ether"))
+      //     );
+
+      //     const beforeBalanceFrom = await web3.eth.getBalance(user);
+      //     const beforeBalanceTo = await balanceOf(BEPUSDT_Instance, user);
+      //     await swapExactETHForTokens(
+      //       amountOut,
+      //       amountIn,
+      //       path,
+      //       user,
+      //       beforeBalanceFrom,
+      //       beforeBalanceTo
+      //     );
+      //   });
+
+      //   it(" <------> swapTokensForExactETH User - 4 <------> ", async () => {
+      //     const user = testAccount(4);
+      //     const amountOut = web3.utils.toWei("4", "ether");
+      //     const path = [BEPUSDT_Instance.address, WMETA_Instance.address];
+      //     const amountInMax = await getAmountsIn(amountOut, path);
+      //     const balanceOfFrom = await balanceOf(BEPUSDT_Instance, user);
+      //     const balanceOfTo = await web3.eth.getBalance(user);
+      //     swapTokensForExactETH(
+      //       amountOut,
+      //       amountInMax,
+      //       path,
+      //       user,
+      //       balanceOfFrom,
+      //       balanceOfTo
+      //     ); //console.log("getAmountsIn",Number(getAmountsIn[0]))
+      //   });
+      //   it(" <------> swapTokensForExactETH User - 16 <------> ", async () => {
+      //     const user = testAccount(16);
+      //     const amountOut = web3.utils.toWei("400", "ether");
+      //     const path = [BEPUSDT_Instance.address, WMETA_Instance.address];
+      //     const amountInMax = await getAmountsIn(amountOut, path);
+      //     const balanceOfFrom = await balanceOf(BEPUSDT_Instance, user);
+      //     const balanceOfTo = await web3.eth.getBalance(user);
+      //     swapTokensForExactETH(
+      //       amountOut,
+      //       amountInMax,
+      //       path,
+      //       user,
+      //       balanceOfFrom,
+      //       balanceOfTo
+      //     ); //console.log("getAmountsIn",Number(getAmountsIn[0]))
+      //   });
+      //   it(" <------> swapTokensForExactETH User - 12 <------> ", async () => {
+      //     const user = testAccount(12);
+      //     const amountOut = web3.utils.toWei("4", "ether");
+      //     const path = [BEPUSDT_Instance.address, WMETA_Instance.address];
+      //     const amountInMax = await getAmountsIn(amountOut, path);
+      //     const balanceOfFrom = await balanceOf(BEPUSDT_Instance, user);
+      //     const balanceOfTo = await web3.eth.getBalance(user);
+      //     await swapTokensForExactETH(
+      //       amountOut,
+      //       amountInMax,
+      //       path,
+      //       user,
+      //       balanceOfFrom,
+      //       balanceOfTo
+      //     ); //console.log("getAmountsIn",Number(getAmountsIn[0]))
+      //   });
+
+      //   it(" <------> swapExactTokensForETH user - 13 <------> ", async () => {
+      //     const user = testAccount(13);
+      //     const amountIn = web3.utils.toWei("3", "ether");
+      //     const path = [BEPUSDT_Instance.address, WMETA_Instance.address];
+      //     const amountOut = await getAmountsOut(amountIn, path);
+      //     const balanceOfFrom = await balanceOf(BEPUSDT_Instance, user);
+      //     const balanceOfTo = await web3.eth.getBalance(user);
+      //     await swapExactTokensForETH(
+      //       amountOut,
+      //       amountIn,
+      //       path,
+      //       user,
+      //       balanceOfFrom,
+      //       balanceOfTo
+      //     );
+      //   });
+      //   it(" <------> swapExactTokensForETH User - 17 <------> ", async () => {
+      //     const user = testAccount(17);
+      //     const amountIn = web3.utils.toWei("1000", "ether");
+      //     const path = [BEPUSDT_Instance.address, WMETA_Instance.address];
+      //     const amountOut = await getAmountsOut(amountIn, path);
+      //     const balanceOfFrom = await balanceOf(BEPUSDT_Instance, user);
+      //     const balanceOfTo = await web3.eth.getBalance(user);
+      //     await swapExactTokensForETH(
+      //       amountOut,
+      //       amountIn,
+      //       path,
+      //       user,
+      //       balanceOfFrom,
+      //       balanceOfTo
+      //     ); //console.log("getAmountsIn",Number(getAmountsIn[0]))
+      //   });
+      //   it(" <------> swapExactTokensForETH User - 18 <------> ", async () => {
+      //     const user = testAccount(17);
+      //     const amountIn = web3.utils.toWei("100", "ether");
+      //     const path = [BEPUSDT_Instance.address, WMETA_Instance.address];
+      //     const amountOut = await getAmountsOut(amountIn, path);
+      //     const balanceOfFrom = await balanceOf(BEPUSDT_Instance, user);
+      //     const balanceOfTo = await web3.eth.getBalance(user);
+      //     await swapExactTokensForETH(
+      //       amountOut,
+      //       amountIn,
+      //       path,
+      //       user,
+      //       balanceOfFrom,
+      //       balanceOfTo
+      //     ); //console.log("getAmountsIn",Number(getAmountsIn[0]))
+      //   });
+
+      //   it(" <------> swapETHForExactTokens User - 6 <------> ", async () => {
+      //     const user = testAccount(6);
+      //     const amountOut = web3.utils.toWei("12", "ether");
+      //     const path = [WMETA_Instance.address, BEPUSDT_Instance.address];
+      //     const amountIn = await getAmountsIn(amountOut, path);
+      //     const beforeBalanceFrom = await web3.eth.getBalance(user);
+      //     const beforeBalanceTo = await balanceOf(BEPUSDT_Instance, user);
+
+      //     await swapETHForExactTokens(
+      //       amountOut,
+      //       amountIn,
+      //       path,
+      //       user,
+      //       beforeBalanceFrom,
+      //       beforeBalanceTo
+      //     );
+      //   });
+      //   it(" <------> swapETHForExactTokens User - 7 <------> ", async () => {
+      //     const user = testAccount(7);
+      //     const amount = web3.utils.toWei("1000", "ether");
+      //     const amountOut = web3.utils.toWei("1000", "ether");
+      //     const path = [WMETA_Instance.address, BEPUSDT_Instance.address];
+      //     const beforeBalanceFrom = await web3.eth.getBalance(user);
+      //     const beforeBalanceTo = await balanceOf(BEPUSDT_Instance, user);
+      //     await swapETHForExactTokens(
+      //       amountOut,
+      //       amount,
+      //       path,
+      //       user,
+      //       beforeBalanceFrom,
+      //       beforeBalanceTo
+      //     );
+      //   });
+      //   it(" <------> swapETHForExactTokens User - 15 <------> ", async () => {
+      //     const user = testAccount(15);
+      //     const amountOut = web3.utils.toWei("6", "ether");
+      //     const path = [WMETA_Instance.address, BEPUSDT_Instance.address];
+      //     const amountIn = await getAmountsIn(amountOut, path);
+      //     const beforeBalanceFrom = await web3.eth.getBalance(user);
+      //     const beforeBalanceTo = await balanceOf(BEPUSDT_Instance, user);
+      //     await swapETHForExactTokens(
+      //       amountOut,
+      //       amountIn,
+      //       path,
+      //       user,
+      //       beforeBalanceFrom,
+      //       beforeBalanceTo
+      //     );
+      //   });
+      // });
+
+      // describe(" <------------> removeLiquidityOnETH <------------> ", () => {
+      //   it(" <------> 10:1000 removeLiquidity User - 7 userlp:100, usdt:10, wmeta:1000 <------> ", async () => {
+      //     const user = testAccount(7);
+      //     const pairContract = await pairInstance();
+      //     const liqudityAmount = await balanceOf(pairContract, user);
+      //     await approve(
+      //       pairContract,
+      //       Router_Instance.address,
+      //       liqudityAmount,
+      //       user
+      //     );
+      //     await removeLiquidityETH(liqudityAmount, user);
+      //   });
+      //   it(" <------> 10:10 removeLiquidity User - 6 userlp:1, usdt:10, wmeta:10 <------> ", async () => {
+      //     const user = testAccount(6);
+      //     const pairContract = await pairInstance();
+      //     const liqudityAmount = await balanceOf(pairContract, user);
+      //     await approve(
+      //       pairContract,
+      //       Router_Instance.address,
+      //       liqudityAmount,
+      //       user
+      //     );
+      //     await removeLiquidityETH(liqudityAmount, user);
+      //   });
+      //   it(" <------> 200:100 removeLiquidity testAccount 9 userlp:10, usdt:200, wmeta:100 <------> ", async () => {
+      //     const pariAddress = await Factory_Instance.getPair(
+      //       BEPUSDT_Instance.address,
+      //       WMETA_Instance.address
+      //     );
+      //     const pairInstance = await pair.at(pariAddress);
+
+      //     //PARAMS START
+      //     const user = testAccount9;
+      //     const _router = Router_Instance.address;
+      //     const _factory = Factory_Instance.address;
+      //     const _token = BEPUSDT_Instance.address;
+      //     const _weth = WMETA_Instance.address;
+
+      //     let liquidityAmount = String(
+      //       Number(await pairInstance.balanceOf(user))
+      //     );
+      //     const slippage =
+      //       (Number(liquidityAmount) * Number(0.001e18)) / Number(10e18);
+
+      //     liquidityAmount = String(Number(liquidityAmount) - Number(slippage));
+      //     //console.log("liquidityAmount", liquidityAmount);
+
+      //     const amountTokenMin = String(0);
+      //     const amountEthMin = String(2);
+      //     const to = user;
+      //     const deadline = String(
+      //       Number(await time.latest()) + Number(time.duration.minutes(5))
+      //     );
+
+      //     await pairInstance.approve(Router_Instance.address, liquidityAmount, {
+      //       from: user,
+      //     });
+
+      //     const reserve = await pairInstance.getReserves();
+      //     // console.log("reserve_token", Number(reserve[0]));
+      //     // console.log("reserve_wmeta", Number(reserve[1]));
+
+      //     const hash = await Intermediate_Instance.prepareMessageHash(
+      //       _router,
+      //       liquidityAmount,
+      //       amountTokenMin,
+      //       _weth,
+      //       _token,
+      //       to,
+      //       deadline
+      //     );
+
+      //     const signature = await web3.eth.accounts.sign(
+      //       hash,
+      //       "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
+      //     );
+
+      //     const liquidityBalance = await pairInstance.balanceOf(user); //1
+      //     const tokenBalance = await BEPUSDT_Instance.balanceOf(user); //12
+      //     const wethBalance = await web3.eth.getBalance(user); //9983
+
+      //     // console.log("liquidityBalance",Number(liquidityBalance));
+      //     // console.log("tokenBalance",Number(tokenBalance));
+      //     // console.log("wethBalance",Number(wethBalance));
+
+      //     const LiquidityBalance = Number("10000000000000000000");
+      //     const WethBalance = "9.899998926187436e+21";
+
+      //     expect(Number(liquidityBalance)).equal(LiquidityBalance);
+      //     expect(Number(tokenBalance)).equal(Number("0"));
+      //     expect(Number(wethBalance / 1e18).toFixed()).equal(
+      //       Number(WethBalance / 1e18).toFixed()
+      //     );
+
+      //     await Intermediate_Instance.removeLiquidityOnETH(
+      //       [
+      //         _router,
+      //         _factory,
+      //         _token,
+      //         _weth,
+      //         liquidityAmount,
+      //         amountTokenMin,
+      //         amountEthMin,
+      //         to,
+      //         deadline,
+      //         signature.signature,
+      //       ],
+      //       { from: user }
+      //     );
+
+      //     const liquidityBalances = await pairInstance.balanceOf(user);
+      //     const tokenBalances = await BEPUSDT_Instance.balanceOf(user);
+      //     const wethBalances = await web3.eth.getBalance(user);
+
+      //     // console.log("liquidityBalance",Number(liquidityBalances));
+      //     // console.log("tokenBalance",Number(tokenBalances));
+      //     // console.log("wethBalance",Number(wethBalances));
+
+      //     const userliquidityAmount =
+      //       Number(LiquidityBalance) - Number(liquidityAmount);
+      //     // console.log("userliquidityAmount", userliquidityAmount)
+
+      //     const usertokenBalance = Number("200000000000000000000");
+      //     const userWethBalance = Number("100000000000000000000");
+
+      //     const FinalusertokenBalnce = tokenBalances - tokenBalance;
+      //     const FinaluserwethBalance = wethBalances - WethBalance;
+
+      //     expect(Number(liquidityBalances)).equal(userliquidityAmount);
+      //     expect(Number(FinalusertokenBalnce / 1e18).toFixed()).equal(
+      //       Number(usertokenBalance / 1e18).toFixed()
+      //     );
+      //     expect(Number(FinaluserwethBalance / 1e18).toFixed()).equal(
+      //       Number(userWethBalance / 1e18).toFixed()
+      //     );
+      //   });
+      //   it(" <------> 5000:100 removeLiquidity User 9 userlp:10, usdt:5000, wmeta:100 <------> ", async () => {
+      //     const pariAddress = await Factory_Instance.getPair(
+      //       BEPUSDT_Instance.address,
+      //       WMETA_Instance.address
+      //     );
+      //     const pairInstance = await pair.at(pariAddress);
+
+      //     //PARAMS START
+      //     const user = testAccount(9);
+      //     const _router = Router_Instance.address;
+      //     const _factory = Factory_Instance.address;
+      //     const _token = BEPUSDT_Instance.address;
+      //     const _weth = WMETA_Instance.address;
+
+      //     let liquidityAmount = String(
+      //       Number(await pairInstance.balanceOf(user))
+      //     );
+      //     const slippage =
+      //       (Number(liquidityAmount) * Number(0.001e18)) / Number(10e18);
+
+      //     liquidityAmount = String(Number(liquidityAmount) - Number(slippage));
+      //     const amountTokenMin = String(0);
+      //     const amountEthMin = String(2);
+      //     const to = user;
+      //     const deadline = String(
+      //       Number(await time.latest()) + Number(time.duration.minutes(5))
+      //     );
+
+      //     await pairInstance.approve(Router_Instance.address, liquidityAmount, {
+      //       from: user,
+      //     });
+
+      //     const reserve = await pairInstance.getReserves();
+      //     // console.log("reserve_token", Number(reserve[0]));
+      //     // console.log("reserve_wmeta", Number(reserve[1]));
+
+      //     const hash = await Intermediate_Instance.prepareMessageHash(
+      //       _router,
+      //       liquidityAmount,
+      //       amountTokenMin,
+      //       _weth,
+      //       _token,
+      //       to,
+      //       deadline
+      //     );
+
+      //     const signature = await web3.eth.accounts.sign(
+      //       hash,
+      //       "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
+      //     );
+
+      //     const liquidityBalance = await pairInstance.balanceOf(user); //1
+      //     const tokenBalance = await BEPUSDT_Instance.balanceOf(user); //12
+      //     const wethBalance = await web3.eth.getBalance(user); //9983
+
+      //     const LiquidityBalance = Number("10000000000000000000");
+      //     const WethBalance = "9.899998926187436e+21";
+
+      //     expect(Number(liquidityBalance)).equal(LiquidityBalance);
+      //     expect(Number(tokenBalance)).equal(Number("0"));
+      //     expect(Number(wethBalance / 1e18).toFixed()).equal(
+      //       Number(WethBalance / 1e18).toFixed()
+      //     );
+
+      //     await Intermediate_Instance.removeLiquidityOnETH(
+      //       [
+      //         _router,
+      //         _factory,
+      //         _token,
+      //         _weth,
+      //         liquidityAmount,
+      //         amountTokenMin,
+      //         amountEthMin,
+      //         to,
+      //         deadline,
+      //         signature.signature,
+      //       ],
+      //       { from: user }
+      //     );
+
+      //     const liquidityBalances = await pairInstance.balanceOf(user);
+      //     const tokenBalances = await BEPUSDT_Instance.balanceOf(user);
+      //     const wethBalances = await web3.eth.getBalance(user);
+
+      //     const userliquidityAmount =
+      //       Number(LiquidityBalance) - Number(liquidityAmount);
+      //     //console.log("userliquidityAmount", userliquidityAmount)
+
+      //     const usertokenBalance = Number("5000000000000000000000");
+      //     const userWethBalance = Number("100000000000000000000");
+
+      //     const FinalusertokenBalnce = tokenBalances - tokenBalance;
+      //     const FinaluserwethBalance = wethBalances - WethBalance;
+
+      //     expect(Number(liquidityBalances)).equal(userliquidityAmount);
+      //     expect(Number(FinalusertokenBalnce / 1e18).toFixed()).equal(
+      //       Number(usertokenBalance / 1e18).toFixed()
+      //     );
+      //     expect(Number(FinaluserwethBalance / 1e18).toFixed()).equal(
+      //       Number(userWethBalance / 1e18).toFixed()
+      //     );
+      //   });
+      //   it(" <------> 500: 9000 removeLiquidity User - 10 userlp:10, usdt:500, wmeta:9000 <------> ", async () => {
+      //     const pariAddress = await Factory_Instance.getPair(
+      //       BEPUSDT_Instance.address,
+      //       WMETA_Instance.address
+      //     );
+      //     const pairInstance = await pair.at(pariAddress);
+
+      //     const pool1 = await pairInstance.token0();
+      //     const pool2 = await pairInstance.token1();
+
+      //     // console.log("pool1", pool1);
+      //     // console.log("token", BEPUSDT_Instance.address);
+
+      //     // console.log("pool2", pool2);
+      //     // console.log("wmeta", WMETA_Instance.address);
+
+      //     const reserve = await pairInstance.getReserves();
+
+      //     //PARAMS START
+      //     const user = testAccount(10);
+      //     const _router = Router_Instance.address;
+      //     const _factory = Factory_Instance.address;
+      //     const _token = BEPUSDT_Instance.address;
+      //     const _weth = WMETA_Instance.address;
+
+      //     let liquidityAmount = String(
+      //       Number(await pairInstance.balanceOf(user))
+      //     );
+      //     const slippage =
+      //       (Number(liquidityAmount) * Number(0.001e18)) / Number(10e18);
+
+      //     liquidityAmount = String(
+      //       Number(Number(liquidityAmount) - Number(slippage))
+      //     );
+      //     //console.log("liquidityAmount", liquidityAmount);
+
+      //     const amountTokenMin = String(0);
+      //     const amountEthMin = String(2);
+      //     const to = user;
+      //     const deadline = String(
+      //       Number(await time.latest()) + Number(time.duration.minutes(5))
+      //     );
+
+      //     await pairInstance.approve(Router_Instance.address, liquidityAmount, {
+      //       from: user,
+      //     });
+
+      //     const hash = await Intermediate_Instance.prepareMessageHash(
+      //       _router,
+      //       liquidityAmount,
+      //       amountTokenMin,
+      //       _weth,
+      //       _token,
+      //       to,
+      //       deadline
+      //     );
+
+      //     const signature = await web3.eth.accounts.sign(
+      //       hash,
+      //       "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
+      //     );
+
+      //     const liquidityBalance = await pairInstance.balanceOf(user);
+      //     const tokenBalance = await BEPUSDT_Instance.balanceOf(user);
+      //     const wethBalance = await web3.eth.getBalance(user);
+
+      //     const LiquidityBalance = Number("11590038314176246000");
+      //     // const WethBalance = "9.899998926187436e+21";
+
+      //     expect(Number(liquidityBalance)).equal(LiquidityBalance);
+      //     expect(Number(tokenBalance)).equal(Number("0"));
+      //     //expect(Number(wethBalance / 1e18).toFixed()).equal(Number(WethBalance / 1e18).toFixed());
+
+      //     console.log("liquidityBalance", Number(liquidityBalance));
+      //     console.log("tokenBalance", Number(tokenBalance));
+      //     console.log("wethBalance", Number(wethBalance));
+
+      //     await Intermediate_Instance.removeLiquidityOnETH(
+      //       [
+      //         _router,
+      //         _factory,
+      //         _token,
+      //         _weth,
+      //         liquidityAmount,
+      //         amountTokenMin,
+      //         amountEthMin,
+      //         to,
+      //         deadline,
+      //         signature.signature,
+      //       ],
+      //       { from: user }
+      //     );
+
+      //     const liquidityBalances = await pairInstance.balanceOf(user);
+      //     const tokenBalances = await BEPUSDT_Instance.balanceOf(user);
+      //     const wethBalances = await web3.eth.getBalance(user);
+
+      //     // console.log("liquidityBalance", Number(liquidityBalances));
+      //     console.log("tokenBalance", Number(tokenBalances));
+      //     console.log("wethBalance", Number(wethBalances));
+
+      //     const userliquidityAmount =
+      //       Number(LiquidityBalance) - Number(liquidityAmount);
+      //     //console.log("userliquidityAmount", userliquidityAmount)
+
+      //     const usertokenBalance = Number("200000000000000000000");
+      //     const userWethBalance = Number("100000000000000000000");
+
+      //     const FinalusertokenBalnce = tokenBalances - tokenBalance;
+      //     const FinaluserwethBalance = wethBalances - wethBalance;
+
+      //     console.log("FinalusertokenBalnce", Number(FinalusertokenBalnce));
+      //     console.log("FinaluserwethBalance", Number(FinaluserwethBalance));
+
+      //     expect(Number(liquidityBalances / 1e18).toFixed()).equal(
+      //       Number(userliquidityAmount / 1e18).toFixed()
+      //     );
+      //     // expect(Number(FinalusertokenBalnce / 1e18).toFixed()).equal(Number(usertokenBalance / 1e18).toFixed());
+      //     // expect(Number(FinaluserwethBalance / 1e18).toFixed()).equal(Number(userWethBalance / 1e18).toFixed());
+      //   });
+      // });
+    });
+  });
+});

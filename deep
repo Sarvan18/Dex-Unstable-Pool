@@ -1,0 +1,43 @@
+describe("Uniswap Liquidity", function() {
+  it("should add liquidity with correct reserve ordering", async function() {
+    // Deploy a test token
+    const Token = await ethers.getContractFactory("ERC20");
+    const token = await Token.deploy("Test Token", "TEST");
+    await token.deployed();
+    
+    // Check the address ordering
+    const tokenAddress = token.address.toLowerCase();
+    const wethAddress = wethContract.address.toLowerCase();
+    const isTokenFirst = tokenAddress < wethAddress;
+    
+    // Add liquidity
+    await token.approve(router.address, ethers.constants.MaxUint256);
+    await router.addLiquidityETH(
+      token.address,
+      ethers.utils.parseEther("1000"),
+      0,
+      0,
+      owner.address,
+      Date.now() + 1000,
+      { value: ethers.utils.parseEther("1") }
+    );
+    
+    // Get pair
+    const pairAddress = await factory.getPair(token.address, weth.address);
+    const pair = await ethers.getContractAt("IUniswapV2Pair", pairAddress);
+    
+    // Verify reserves
+    const [reserve0, reserve1] = await pair.getReserves();
+    const token0 = await pair.token0();
+    
+    if (token0 === weth.address) {
+      console.log("WETH is token0");
+      expect(reserve0).to.equal(ethers.utils.parseEther("1"));
+      expect(reserve1).to.equal(ethers.utils.parseEther("1000"));
+    } else {
+      console.log("Token is token0");
+      expect(reserve0).to.equal(ethers.utils.parseEther("1000"));
+      expect(reserve1).to.equal(ethers.utils.parseEther("1"));
+    }
+  });
+});
